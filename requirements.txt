@@ -1,3 +1,4 @@
 meshtastic
+pika
 pypubsub
 python-telegram-bot

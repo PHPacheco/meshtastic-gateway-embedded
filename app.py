@@ -3,6 +3,7 @@ import asyncio
 from pubsub import pub
 
 import meshtastic_connection
+import rabbitmq_client
 import telegram_bot
 from meshtastic_nodes import MeshtasticNodes
 from telegram_chats import TelegramChats
@@ -12,6 +13,7 @@ class App:
     def __init__(self):
         self.loop = None
         self.telegram_app = None
+        self.rabbitmq = rabbitmq_client.RabbitMQClient()
         self.meshtastic_connection = meshtastic_connection.MeshtasticConnection(
             self.forward_meshtastic_to_telegram
         )
@@ -23,6 +25,12 @@ class App:
             print("Starting Telegram bot...")
             self.telegram_app = await telegram_bot.start_message_listener(
                 self.forward_telegram_to_meshtastic
+            )
+
+            print("Starting RabbitMQ integration...")
+            self.rabbitmq.connect()
+            self.rabbitmq.start_telegram_to_meshtastic_consumer(
+                self.forward_rabbitmq_to_meshtastic
             )
 
             print("Subscribing to Meshtastic topics...")
@@ -41,11 +49,21 @@ class App:
             if self.telegram_app:
                 await telegram_bot.stop_message_listener(self.telegram_app)
 
+            self.rabbitmq.stop()
             self.meshtastic_connection.interface.close()
 
     def forward_meshtastic_to_telegram(self, message):
         if not self.loop:
             return
+
+        self.rabbitmq.publish_event(
+            "gateway.message.meshtastic_to_telegram",
+            {
+                "telegram_chat": TelegramChats.Pedro.name,
+                "telegram_chat_id": TelegramChats.Pedro.value,
+                "message": message,
+            },
+        )
 
         asyncio.run_coroutine_threadsafe(
             telegram_bot.send_message(TelegramChats.Pedro.value, message),
@@ -64,7 +82,27 @@ class App:
             return
 
         self.meshtastic_connection.send_direct_message(destination_node, message)
+        self.rabbitmq.publish_event(
+            "gateway.message.telegram_to_meshtastic",
+            {
+                "telegram_chat": chat.name,
+                "telegram_chat_id": chat_id,
+                "destination_node": destination_node,
+                "message": message,
+            },
+        )
         print(f"[TELEGRAM -> MESHTASTIC] {chat.name} -> {destination_node}: {message}")
+
+    def forward_rabbitmq_to_meshtastic(self, payload):
+        destination_node = payload.get("destination_node")
+        message = payload.get("message")
+
+        if not destination_node or not message:
+            print(f"Ignoring invalid RabbitMQ command: {payload}")
+            return
+
+        self.meshtastic_connection.send_direct_message(destination_node, message)
+        print(f"[RABBITMQ -> MESHTASTIC] {destination_node}: {message}")
 
     def get_registered_chat(self, chat_id):
         try:
