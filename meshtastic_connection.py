@@ -1,9 +1,21 @@
+import os
+
 import meshtastic.serial_interface
+
+
+MESHTASTIC_SERIAL_PORT_ENV_VAR = "MESHTASTIC_SERIAL_PORT"
 
 
 class MeshtasticConnection:
     def __init__(self, on_message_received):
-        self.interface = meshtastic.serial_interface.SerialInterface()
+        serial_port = os.getenv(MESHTASTIC_SERIAL_PORT_ENV_VAR)
+        if serial_port:
+            self.interface = meshtastic.serial_interface.SerialInterface(
+                devPath=serial_port
+            )
+        else:
+            self.interface = meshtastic.serial_interface.SerialInterface()
+
         self.on_message_received = on_message_received
         self.received_messages = {}
 
