@@ -1,24 +1,24 @@
 # Meshtastic Gateway Embedded
 
-Python gateway service for a Raspberry Pi that integrates Meshtastic, Telegram,
-and RabbitMQ.
+Python gateway for a Raspberry Pi that integrates Meshtastic, Telegram, a
+hosted RabbitMQ broker, a FastAPI backend, and PostgreSQL.
 
 ## Current Architecture
 
 ```text
-Telegram <-> Gateway container <-> Meshtastic radio
-                 |
-                 v
-            RabbitMQ container
+Meshtastic radio <-> Raspberry Pi gateway <-> Telegram
+                           |
+                           v
+                    Hosted RabbitMQ
+                           |
+                           v
+                  FastAPI backend -> PostgreSQL
 ```
 
-The Raspberry Pi runs:
-
-- `gateway`: Python service responsible for Telegram, Meshtastic, and RabbitMQ.
-- `rabbitmq`: message broker with the Management UI enabled.
-
-The cloud backend/API and PostgreSQL database will be added later as separate
-cloud services.
+The gateway keeps the real-time communication path simple: Telegram and
+Meshtastic continue to work directly through the Raspberry service. RabbitMQ,
+the backend, and PostgreSQL are used for message history, monitoring, and
+backend-originated commands.
 
 ## Project Structure
 
@@ -29,56 +29,95 @@ telegram_chats.py         Registered Telegram chats
 meshtastic_connection.py  Meshtastic serial connection
 meshtastic_nodes.py       Registered Meshtastic destination nodes
 rabbitmq_client.py        RabbitMQ publisher and consumer
-Dockerfile                Gateway container image
-docker-compose.yml        Raspberry services: gateway + RabbitMQ
-requirements.txt          Python dependencies
+requirements.txt          Gateway Python dependencies
+backend/                  FastAPI backend and PostgreSQL integration
+ops/                      Raspberry service templates
 ```
 
-## Environment
+## Gateway Environment
 
 Copy `.env.example` to `.env` and fill in the values.
 
 ```env
 TELEGRAM_BOT_TOKEN=your_token_here
 MESHTASTIC_SERIAL_PORT=/dev/ttyUSB0
-RABBITMQ_HOST=rabbitmq
-RABBITMQ_PORT=5672
-RABBITMQ_USER=guest
-RABBITMQ_PASSWORD=guest
+RABBITMQ_URL=amqps://user:password@host/vhost
 RABBITMQ_EXCHANGE=mesh_gateway
 RABBITMQ_TELEGRAM_TO_MESHTASTIC_QUEUE=telegram_to_meshtastic
 ```
 
-On Raspberry, the serial port can also be `/dev/ttyACM0`. Check it with:
+If the hosted broker does not provide a single URL, keep `RABBITMQ_URL` empty
+and fill `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER`,
+`RABBITMQ_PASSWORD`, and `RABBITMQ_USE_TLS`.
+
+On Raspberry, the Meshtastic serial port is usually `/dev/ttyUSB0` or
+`/dev/ttyACM0`. Check it with:
 
 ```bash
 ls /dev/ttyUSB* /dev/ttyACM*
 ```
 
-## RabbitMQ
+Register the real Meshtastic node in `meshtastic_nodes.py` before testing:
 
-RabbitMQ runs with the Management UI through Docker Compose.
-
-```bash
-docker compose up -d rabbitmq
+```python
+Pedro = "!12345678"
 ```
 
-Endpoints:
+## Run Gateway Natively on Raspberry
 
-- AMQP broker: `localhost:5672`
-- Management UI: `http://<raspberry-ip>:15672`
-- Default user: `guest`
-- Default password: `guest`
+Recommended OS: Raspberry Pi OS 64-bit.
 
-The gateway publishes events to the `mesh_gateway` topic exchange:
+```bash
+sudo apt update
+sudo apt upgrade -y
+sudo apt install -y ca-certificates curl git python3 python3-venv python3-pip
+
+git clone https://github.com/PHPacheco/meshtastic-gateway-embedded.git
+cd meshtastic-gateway-embedded
+
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+
+cp .env.example .env
+nano .env
+python3 -m py_compile app.py telegram_bot.py telegram_chats.py meshtastic_connection.py meshtastic_nodes.py rabbitmq_client.py
+python3 app.py
+```
+
+Expected result:
+
+- Meshtastic text messages are forwarded to the registered Telegram chat.
+- Telegram messages from registered chats are forwarded to the registered
+  Meshtastic node.
+- Gateway events are published to RabbitMQ.
+
+## Run Gateway with systemd
+
+Copy `ops/meshtastic-gateway.service` to `/etc/systemd/system/` and adjust
+`WorkingDirectory`, `ExecStart`, and `User` if needed.
+
+```bash
+sudo cp ops/meshtastic-gateway.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable meshtastic-gateway
+sudo systemctl start meshtastic-gateway
+sudo systemctl status meshtastic-gateway
+journalctl -u meshtastic-gateway -f
+```
+
+## RabbitMQ
+
+Use a hosted broker such as CloudAMQP. The gateway publishes events to the
+`mesh_gateway` topic exchange:
 
 - `gateway.message.meshtastic_to_telegram`
 - `gateway.message.telegram_to_meshtastic`
 
 The gateway consumes backend commands from the `telegram_to_meshtastic` queue.
-Commands can be published with routing key `gateway.command.telegram_to_meshtastic`.
+Commands use routing key `gateway.command.telegram_to_meshtastic`.
 
-Payload example:
+Command payload:
 
 ```json
 {
@@ -89,216 +128,44 @@ Payload example:
 }
 ```
 
-## Tests Before Raspberry Deployment
+## Backend and PostgreSQL
 
-Run these tests on your development machine before moving the project to the
-Raspberry.
+The backend lives in `backend/`. It consumes gateway message events from
+RabbitMQ, stores them in PostgreSQL, exposes read endpoints, and can publish
+commands back to the gateway.
 
-1. Validate Python syntax:
-
-```powershell
-python -m py_compile app.py telegram_bot.py telegram_chats.py meshtastic_connection.py meshtastic_nodes.py rabbitmq_client.py
-```
-
-2. Install Python dependencies:
-
-```powershell
+```bash
+cd backend
+python -m venv .venv
+. .venv/bin/activate
 pip install -r requirements.txt
-```
-
-3. Validate environment file:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Then fill `TELEGRAM_BOT_TOKEN` and keep `.env` out of Git.
-
-4. Validate RabbitMQ with Docker:
-
-```powershell
-docker compose up -d rabbitmq
-docker compose ps
-```
-
-Open `http://localhost:15672` and log in with the configured user/password.
-
-5. Validate gateway container build:
-
-```powershell
-docker compose build gateway
-```
-
-6. Validate full stack without Meshtastic connected:
-
-```powershell
-docker compose up gateway rabbitmq
-```
-
-Expected result: RabbitMQ starts, and the gateway may fail only at the
-Meshtastic serial connection if no device is connected. RabbitMQ errors should
-not appear once the broker is healthy.
-
-7. Validate with Meshtastic connected:
-
-```powershell
-docker compose up
-```
-
-Expected result:
-
-- Sending a Meshtastic text message forwards it to Telegram.
-- Sending a Telegram message from a registered chat forwards it to the
-  registered Meshtastic node.
-- RabbitMQ Management UI shows the `mesh_gateway` exchange and
-  `telegram_to_meshtastic` queue.
-
-## Raspberry Pi Setup
-
-Recommended OS: Raspberry Pi OS 64-bit, based on Debian.
-
-1. Update the Raspberry:
-
-```bash
-sudo apt update
-sudo apt upgrade -y
-```
-
-2. Install base packages:
-
-```bash
-sudo apt install -y ca-certificates curl git
-```
-
-3. Install Docker using Docker's official Debian/Raspberry Pi OS instructions.
-For Raspberry Pi OS 64-bit, the Debian install path is commonly used:
-
-```bash
-sudo install -m 0755 -d /etc/apt/keyrings
-sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-sudo chmod a+r /etc/apt/keyrings/docker.asc
-
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
-  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-sudo apt update
-sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-```
-
-4. Allow your user to run Docker:
-
-```bash
-sudo usermod -aG docker $USER
-newgrp docker
-```
-
-5. Validate Docker:
-
-```bash
-docker --version
-docker compose version
-docker run hello-world
-```
-
-6. Clone the project:
-
-```bash
-git clone https://github.com/PHPacheco/meshtastic-gateway-embedded.git
-cd meshtastic-gateway-embedded
-```
-
-7. Create `.env`:
-
-```bash
 cp .env.example .env
 nano .env
+uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-Set:
+Backend endpoints:
 
-- `TELEGRAM_BOT_TOKEN`
-- `MESHTASTIC_SERIAL_PORT`
-- RabbitMQ credentials, if changed.
+- `GET /health`
+- `GET /messages`
+- `POST /messages`
+- `GET /telegram-chats`
+- `GET /meshtastic-nodes`
+- `POST /commands/telegram-to-meshtastic`
 
-8. Connect the Meshtastic device and check the serial port:
+Deploy the backend and PostgreSQL to a hosted platform such as Render or
+Railway. Configure `DATABASE_URL` and the same RabbitMQ settings used by the
+gateway.
 
-```bash
-lsusb
-ls /dev/ttyUSB* /dev/ttyACM*
-```
+## Final Validation Checklist
 
-If needed, use `/dev/ttyACM0` instead of `/dev/ttyUSB0` in `.env`.
-
-9. Start RabbitMQ first:
-
-```bash
-docker compose up -d rabbitmq
-docker compose logs -f rabbitmq
-```
-
-10. Open the Management UI:
-
-```text
-http://<raspberry-ip>:15672
-```
-
-11. Start the gateway:
-
-```bash
-docker compose up -d gateway
-docker compose logs -f gateway
-```
-
-12. Start everything automatically after reboot:
-
-The compose services already use `restart: unless-stopped`. After Docker starts,
-the containers will restart automatically unless stopped manually.
-
-## Operational Checks on Raspberry
-
-```bash
-docker compose ps
-docker compose logs -f gateway
-docker compose logs -f rabbitmq
-```
-
-Check serial device permissions if the gateway cannot open Meshtastic:
-
-```bash
-ls -l /dev/ttyUSB0 /dev/ttyACM0
-```
-
-If the device path changes after reconnecting USB, update `MESHTASTIC_SERIAL_PORT`
-in `.env` and restart:
-
-```bash
-docker compose down
-docker compose up -d
-```
-
-## Notes for Backend/API, PostgreSQL, and Cloud
-
-The Backend/API should run in the cloud and expose endpoints to:
-
-- List messages.
-- List Telegram chats.
-- List Meshtastic nodes.
-- Check gateway health.
-- Send message commands through RabbitMQ.
-
-PostgreSQL should also run in the cloud and store:
-
-- Message history.
-- Registered nodes.
-- Registered Telegram chats.
-- Delivery status.
-- Gateway logs and health events.
-
-Cloud integration options:
-
-- Keep RabbitMQ on the Raspberry for local tests.
-- Move RabbitMQ to the cloud later so both the gateway and API connect outward to
-  the same broker. This is usually easier and safer than exposing the Raspberry
-  RabbitMQ port to the public internet.
+1. Gateway starts on Raspberry without Python errors.
+2. Meshtastic device opens on `/dev/ttyUSB0` or `/dev/ttyACM0`.
+3. Meshtastic -> Telegram works.
+4. Telegram -> Meshtastic works.
+5. RabbitMQ receives both gateway event types.
+6. Backend `/health` returns `ok`.
+7. PostgreSQL stores message history from RabbitMQ events.
+8. `POST /commands/telegram-to-meshtastic` queues a command consumed by the
+   gateway.
+9. Prints/logs are captured for the final report.

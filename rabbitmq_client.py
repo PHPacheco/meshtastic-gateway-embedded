@@ -1,5 +1,6 @@
 import json
 import os
+import ssl
 import threading
 import time
 from datetime import datetime, timezone
@@ -13,6 +14,8 @@ RABBITMQ_HOST_ENV_VAR = "RABBITMQ_HOST"
 RABBITMQ_PORT_ENV_VAR = "RABBITMQ_PORT"
 RABBITMQ_USER_ENV_VAR = "RABBITMQ_USER"
 RABBITMQ_PASSWORD_ENV_VAR = "RABBITMQ_PASSWORD"
+RABBITMQ_URL_ENV_VAR = "RABBITMQ_URL"
+RABBITMQ_USE_TLS_ENV_VAR = "RABBITMQ_USE_TLS"
 RABBITMQ_EXCHANGE_ENV_VAR = "RABBITMQ_EXCHANGE"
 RABBITMQ_TELEGRAM_QUEUE_ENV_VAR = "RABBITMQ_TELEGRAM_TO_MESHTASTIC_QUEUE"
 
@@ -25,6 +28,12 @@ class RabbitMQClient:
         self.port = int(os.getenv(RABBITMQ_PORT_ENV_VAR, "5672"))
         self.user = os.getenv(RABBITMQ_USER_ENV_VAR, "guest")
         self.password = os.getenv(RABBITMQ_PASSWORD_ENV_VAR, "guest")
+        self.url = os.getenv(RABBITMQ_URL_ENV_VAR)
+        self.use_tls = os.getenv(RABBITMQ_USE_TLS_ENV_VAR, "false").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
         self.exchange = os.getenv(RABBITMQ_EXCHANGE_ENV_VAR, "mesh_gateway")
         self.telegram_to_meshtastic_queue = os.getenv(
             RABBITMQ_TELEGRAM_QUEUE_ENV_VAR,
@@ -129,11 +138,22 @@ class RabbitMQClient:
                 self.close_consumer_connection()
 
     def _create_connection(self):
+        if self.url:
+            parameters = pika.URLParameters(self.url)
+            parameters.heartbeat = 60
+            parameters.blocked_connection_timeout = 30
+            return pika.BlockingConnection(parameters)
+
         credentials = pika.PlainCredentials(self.user, self.password)
+        ssl_options = None
+        if self.use_tls:
+            ssl_options = pika.SSLOptions(ssl.create_default_context())
+
         parameters = pika.ConnectionParameters(
             host=self.host,
             port=self.port,
             credentials=credentials,
+            ssl_options=ssl_options,
             heartbeat=60,
             blocked_connection_timeout=30,
         )

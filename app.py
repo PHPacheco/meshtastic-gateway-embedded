@@ -52,13 +52,14 @@ class App:
             self.rabbitmq.stop()
             self.meshtastic_connection.interface.close()
 
-    def forward_meshtastic_to_telegram(self, message):
+    def forward_meshtastic_to_telegram(self, sender_node, message):
         if not self.loop:
             return
 
         self.rabbitmq.publish_event(
             "gateway.message.meshtastic_to_telegram",
             {
+                "sender_node": sender_node,
                 "telegram_chat": TelegramChats.Pedro.name,
                 "telegram_chat_id": TelegramChats.Pedro.value,
                 "message": message,

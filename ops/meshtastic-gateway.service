@@ -1,0 +1,16 @@
+[Unit]
+Description=Meshtastic Gateway Embedded
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/meshtastic-gateway-embedded
+EnvironmentFile=/home/pi/meshtastic-gateway-embedded/.env
+ExecStart=/home/pi/meshtastic-gateway-embedded/.venv/bin/python app.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

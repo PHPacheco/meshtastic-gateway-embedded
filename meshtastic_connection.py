@@ -40,7 +40,7 @@ class MeshtasticConnection:
             print(f"\n[NEW MESHTASTIC MESSAGE] {sender}: {content}")
             print(f"Message map state: {self.received_messages}")
 
-            self.on_message_received(content)
+            self.on_message_received(sender, content)
 
         except Exception as error:
             print(f"Processing error: {error}")
